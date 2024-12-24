@@ -1,0 +1,208 @@
+# 4章記述のワークスペースの各クレートごとにタスクを実行しないようにする
+[config]
+default_to_workspace = false
+# cargo-maek で実行するコマンド全体に共通で設定する環境変数
+[env]
+HOST = "0.0.0.0"
+PORT = 8080
+DATABASE_USERNAME = "app"
+DATABASE_PASSWORD = "passwd"
+DATABASE_NAME = "app"
+DATABASE_PORT_OUTER = 5432
+DATABASE_PORT_INNER = 5432
+REDIS_PORT_OUTER = 6379
+REDIS_PORT_INNER = 6379
+AUTH_TOKEN_TTL = 86400
+
+# extendでタスクごとで追加できる環境変数
+
+# set-env-dockerと#set-env-localで環境変数の設定値を分けている
+# Docker Composeのネットワーク内でのDB等への接続情報
+[tasks.set-env-docker.env]
+DATABASE_HOST = "postgres"
+DATABASE_PORT = "${DATABASE_PORT_INNER}"
+DATABASE_URL = "postgresql://${DATABASE_HOST}:${DATABASE_PORT}/${DATABASE_NAME}?user=${DATABASE_USERNAME}&password=${DATABASE_PASSWORD}"
+REDIS_HOST = "redis"
+REDIS_PORT = "${REDIS_PORT_INNER}"
+JAEGER_HOST = "jaeger"  # 7章で説明
+JAEGER_PORT = 6831  # 7章で説明
+# Docker Compose外からDB等にアクセスする際の接続情報
+[tasks.set-env-local.env]
+DATABASE_HOST = "localhost"
+DATABASE_PORT = "${DATABASE_PORT_OUTER}"
+DATABASE_URL = "postgresql://${DATABASE_HOST}:${DATABASE_PORT}/${DATABASE_NAME}?user=${DATABASE_USERNAME}&password=${DATABASE_PASSWORD}"
+REDIS_HOST = "localhost"
+REDIS_PORT = "${REDIS_PORT_OUTER}"
+JAEGER_HOST = "localhost"  # 7章で説明
+JAEGER_PORT = 6831  # 7章で説明
+
+# #　ビルド・実行時に関するタスク群
+
+# ビルドの前にDB(PostgresSQL)とRedisを起動しておくコマンド
+[tasks.before-build]
+run_task = [
+    { name = [
+        "compose-up-db",
+        "compose-up-redis",
+    ] },
+]
+[tasks.compose-build-app]
+extend = "set-env-local"
+command = "docker"
+args = [
+  "compose", "build", "app",
+  "--build-arg", "BUILDKIT_INLINE_CACHE=1", "${@}"
+]
+# ローカルマシン上でRustプログラムを実行する際に使うタスク
+[tasks.run]
+extend = "set-env-local"
+dependencies = ["before-build"]
+command = "cargo"
+args = ["run", "${@}"]
+# Docker上でRustプログラムを実行する場合に使うタスク
+[tasks.run-in-docker]
+extend = "set-env-docker"
+dependencies = ["before-build", "compose-build-app"]
+command = "docker"
+args = ["compose", "up", "-d", "app"]
+[tasks.logs]
+extend = "set-env-docker"
+dependencies = ["before-build"]
+command = "docker"
+args = ["compose", "logs", "${@}"]
+[tasks.build]
+extend = "set-env-local"
+dependencies = ["before-build"]
+command = "cargo"
+args = ["build", "${@}"]
+[tasks.check]
+extend = "set-env-local"
+dependencies = ["before-build"]
+command = "cargo"
+args = ["check"]
+
+
+### Development
+# cargo makeのtask属性がtrueの際に、プロジェクト内のファルに変更があるとタスクを実行(watch)
+# ここではfmt,clippy,testの三つを実行するように設定
+
+[tasks.watch]
+extend = "set-env-local"
+dependencies = ["before-build"]
+run_task = [{ name = ["fmt", "clippy", "test"] }]
+watch = true
+
+[tasks.fmt]
+extend = "set-env-local"
+command = "cargo"
+args = ["fmt", "--all", "${@}"]
+
+[tasks.clippy]
+extend = "set-env-local"
+command = "cargo"
+args = ["clippy", "--all", "--all-targets", "${@}"]
+
+[tasks.test]
+extend = "set-env-local"
+install_crate = { crate_name = "cargo-nextest", binary = "cargo", test_arg = [
+  "nextest", "--help",
+] }
+command = "cargo"
+args = [
+  "nextest", "run", "--workspace",
+  "--status-level", "all", "--test-threads=1",
+]
+
+[tasks.clippy-ci]
+extend = "set-env-local"
+dependencies = ["before-build"]
+command = "cargo"
+args = ["clippy", "--", "--no-deps", "-Dwarnings"]
+
+[tasks.test-ci]
+dependencies = ["before-build"]
+run_task = "test"
+
+# 以下データベース操作用のタスク
+### Migration
+
+[tasks.migrate]
+extend = "set-env-local"
+install_crate = { crate_name = "sqlx-cli", binary = "sqlx", test_arg = "--help", version = "0.7.3" }
+script = '''
+#!/bin/bash
+until sqlx migrate run --source adapter/migrations; do
+    sleep 1
+done
+'''
+
+[tasks.sqlx]
+extend = "set-env-local"
+install_crate = { crate_name = "sqlx-cli", binary = "sqlx", test_arg = "--help", version = "0.7.3" }
+command = "sqlx"
+args = ["${@}", "--source", "adapter/migrations"]
+
+[tasks.psql]
+extend = "set-env-local"
+command = "docker"
+args = [
+  "run", "-it", "--rm",
+  "--network", "host",
+  "-v", "${PWD}:/work",
+  "postgres:15", "psql", "${DATABASE_URL}", "${@}"
+]
+
+[tasks.initial-setup]
+extend = "set-env-local"
+command = "docker"
+args = [
+  "run", "-it", "--rm",
+  "--network", "host",
+  "-v", "${PWD}:/work",
+  "postgres:15", "psql", "${DATABASE_URL}",
+  "-f", "/work/data/initial_setup.sql"
+]
+
+# Docker Compose ないの各種サービスを起動したり壊したりするためのコマンド
+### Docker Compose
+
+[tasks.compose]
+extend = "set-env-docker"
+command = "docker"
+args = ["compose", "${@}"]
+
+[tasks.compose-up-db]
+extend = "set-env-docker"
+command = "docker"
+args = ["compose", "up", "-d", "postgres"]
+
+[tasks.compose-up-redis]
+extend = "set-env-docker"
+command = "docker"
+args = ["compose", "up", "-d", "redis"]
+
+[tasks.compose-down]
+extend = "set-env-docker"
+command = "docker"
+args = ["compose", "down"]
+
+[tasks.compose-remove]
+extend = "set-env-docker"
+command = "docker"
+args = ["compose", "down", "-v"]
+
+### 
+
+[tasks.create-hash]
+script_runner = "@rust"
+script = '''
+//! ```cargo
+//! [dependencies]
+//! bcrypt = "0.15.1"
+//! ```
+fn main() {
+    let password = &std::env::args().collect::<Vec<String>>()[1];
+    let hashed = bcrypt::hash(password, bcrypt::DEFAULT_COST).unwrap();
+    println!("{}", hashed);
+}
+'''
