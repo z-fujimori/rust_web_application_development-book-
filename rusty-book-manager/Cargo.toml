@@ -3,9 +3,33 @@ name = "rusty-book-manager"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
-axum = { version = "0.7.5", features = ["macros"] }
-tokio = { version = "1.37.0", features = ["full"] }
+[workspace]
+members = ["api", "kernel", "adapter", "shared", "registry"]
 
-[dev-dependencies]
+[[bin]]
+name = "app"
+path = "src/bin/app.rs"
+
+[workspace.dependencies]
+anyhow = { version = "1.0.75", features = ["backtrace"] }
+axum = { version = "0.7.5", features = ["macros"] }
+sqlx = { version = "0.7.5", features = [
+    "runtime-tokio",
+    "uuid",
+    "macros",
+    "postgres",
+    "migrate",
+] }
+tokio = { version = "1.37.0", features = ["full"] }
 rstest = "0.18.2"
+
+[dependencies]
+adapter.workspace = true
+api.workspace = true
+registry.workspace = true
+shared.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+axum.workspace = true
+sqlx.workspace = true
+
